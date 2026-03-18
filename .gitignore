@@ -1,0 +1,36 @@
+# ─── External dependency (local dev only) ────────────────────────────────────
+# tradingview-api/ is a cloned external repo (github.com/Mathieu2301/TradingView-API).
+# It is NOT part of this repository. It lives alongside for local development only.
+# For CI/production the npm package (@mathieuc/tradingview) is used instead.
+# See tradingview-agent/package.json and README.md for details.
+tradingview-api/
+
+# ─── Dependencies ────────────────────────────────────────────────────────────
+# Root node_modules (hoisted by npm workspaces)
+node_modules/
+
+# Each package also has its own node_modules — covered by their own .gitignore
+
+# ─── Environment ─────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ─── Logs ────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ─── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── Editors ─────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── Claude Code (local settings) ────────────────────────────────────────────
+.claude/

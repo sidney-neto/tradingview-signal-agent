@@ -1,0 +1,17 @@
+{
+  "name": "tradingview-agent",
+  "version": "0.1.0",
+  "description": "Market analysis backend for conversational AI agents (OpenClaw integration)",
+  "main": "src/tools/analyzeMarket.js",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16"
+  },
+  "dependencies": {
+    "@mathieuc/tradingview": "^3.5.2"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "test": "node test/smoke.js"
+  }
+}

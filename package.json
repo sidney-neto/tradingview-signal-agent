@@ -1,0 +1,17 @@
+{
+  "name": "tradingview-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Monorepo: TradingView data client + AI market analysis agent",
+  "workspaces": [
+    "tradingview-agent"
+  ],
+  "scripts": {
+    "test":       "npm run test --workspace=tradingview-agent",
+    "test:agent": "npm run test --workspace=tradingview-agent"
+  },
+  "engines": {
+    "node": ">=16",
+    "npm": ">=7"
+  }
+}
