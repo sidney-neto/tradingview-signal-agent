@@ -77,4 +77,18 @@ module.exports = {
 
   /** Default number of long/short ratio records to fetch */
   COINGLASS_LS_LIMIT: 24,
+
+  // ── Bybit adapter ──────────────────────────────────────────────────────────
+
+  /** Default request timeout for Bybit API calls (ms) */
+  BYBIT_TIMEOUT_MS: 10_000,
+
+  /** Default number of funding rate records to fetch */
+  BYBIT_FUNDING_LIMIT: 24,
+
+  /** Default number of open interest records to fetch */
+  BYBIT_OI_LIMIT: 42,
+
+  /** Default number of long/short ratio records to fetch */
+  BYBIT_LS_LIMIT: 24,
 };

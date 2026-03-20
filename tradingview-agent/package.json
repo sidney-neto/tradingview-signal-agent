@@ -12,6 +12,7 @@
   },
   "devDependencies": {},
   "scripts": {
-    "test": "node test/smoke.js"
+    "test": "node --env-file=.env test/smoke.js",
+    "start": "node --env-file=.env"
   }
 }

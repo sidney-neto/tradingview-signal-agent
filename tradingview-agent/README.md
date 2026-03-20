@@ -26,6 +26,16 @@ tradingview-agent/
       liquidation.js        ← getLiquidationContext()
       macro.js              ← getMacroContext() (F&G, BTC.D, Altcoin Season)
       index.js              ← barrel export
+    adapters/bybit/         ← official Bybit V5 public market-data layer (read-only)
+      client.js             ← shared V5 HTTP client (mainnet/testnet, envelope, error mapping)
+      errors.js             ← typed Bybit error classes
+      normalize.js          ← symbol normalization + record normalizers
+      instruments.js        ← getInstrumentInfo()
+      tickers.js            ← getTickerContext()
+      funding.js            ← getFundingContext()
+      openInterest.js       ← getOpenInterestContext()
+      longShort.js          ← getLongShortContext()
+      index.js              ← barrel export
     analyzer/
       indicators.js         ← EMA(n), SMA(n)
       rsi.js                ← RSI 14 (Wilder smoothing)
@@ -37,6 +47,18 @@ tradingview-agent/
       rules.js              ← trend, momentum, signal classification
       scoring.js            ← data-quality assessment + confidence adjustment
       summary.js            ← human-readable summary generation
+      patterns/
+        index.js            ← detectChartPatterns() entrypoint
+        normalize.js        ← pattern schema + PATTERN_TYPES/BIAS/STATUS enums
+        geometry.js         ← fitLine, lineAt, isFlat, isRising, isFalling, findLowest, …
+        scoring.js          ← scoreSymmetry, countTouches, weightedScore, qualityToConfidence, …
+        headShoulders.js    ← Head & Shoulders / Inverse H&S
+        doubleTopBottom.js  ← Double Top / Double Bottom
+        triangles.js        ← Ascending, Descending, Symmetrical Triangles
+        flags.js            ← Bull/Bear Flags and Pennants
+        wedges.js           ← Rising Wedge (bearish) / Falling Wedge (bullish)
+        cupHandle.js        ← Cup and Handle
+        rectangles.js       ← Rectangle / Range
     tools/
       analyzeMarket.js      ← main entry point function
     config/
@@ -137,6 +159,26 @@ const result = await analyzeMarket({
     atr14:       1240.5,
   },
 
+  // Chart patterns (null array when ≤40 candles or options.skipPatterns=true)
+  chartPatterns: [
+    {
+      type:              'head_and_shoulders',    // see pattern types below
+      displayName:       'Ombro-Cabeça-Ombro',   // PT-BR label
+      bias:              'bearish',               // bullish | bearish | neutral
+      status:            'near_breakout',         // forming | near_breakout | confirmed
+      confidence:        0.56,                   // 0–0.70 (capped; quality-derived)
+      quality:           0.72,                   // raw quality score 0–1
+      timeframe:         '1h',
+      startIndex:        120,                    // candle index of pattern start
+      endIndex:          199,                    // candle index of pattern end (current)
+      keyLevels:         { ... },                // pattern-specific price levels
+      breakoutLevel:     67400.0,
+      invalidationLevel: 68200.0,
+      explanation:       'Ombro-Cabeça-Ombro: ...',
+      source:            'pattern_detector',
+    }
+  ],
+
   // Structure
   trendlineState: {
     activeTrendlineType: 'bearish',   // bearish | bullish | both | none
@@ -220,6 +262,53 @@ All errors from the adapter layer are typed domain errors exported from `src/ada
 | Accumulation zone | Consolidation + prior decline + low defense heuristics |
 
 All computations are local to this repository and do not depend on TradingView indicators or external proprietary code.
+
+---
+
+## Chart pattern detection
+
+`detectChartPatterns(candles, options)` in `src/analyzer/patterns/` runs a conservative heuristic pipeline over the candle series. It is called automatically by `analyzeMarket()` and returned as `chartPatterns`.
+
+### Detected patterns
+
+| Type constant | Display name (PT-BR) | Bias |
+|---|---|---|
+| `head_and_shoulders` | Ombro-Cabeça-Ombro | bearish |
+| `inverse_head_and_shoulders` | OCO Invertido | bullish |
+| `double_top` | Topo Duplo | bearish |
+| `double_bottom` | Fundo Duplo | bullish |
+| `ascending_triangle` | Triângulo Ascendente | bullish |
+| `descending_triangle` | Triângulo Descendente | bearish |
+| `symmetrical_triangle` | Triângulo Simétrico | neutral |
+| `bull_flag` | Bandeira de Alta | bullish |
+| `bear_flag` | Bandeira de Baixa | bearish |
+| `bull_pennant` | Flâmula de Alta | bullish |
+| `bear_pennant` | Flâmula de Baixa | bearish |
+| `rising_wedge` | Cunha Ascendente | bearish |
+| `falling_wedge` | Cunha Descendente | bullish |
+| `cup_and_handle` | Xícara e Alça | bullish |
+| `rectangle` | Retângulo / Range | neutral |
+
+### Design constraints
+
+- **No lookahead**: only current bar and history are used
+- **ATR-relative tolerances**: all thresholds scale with volatility, not fixed prices
+- **Conservative**: patterns with `quality < 0.28` are rejected; under-detection preferred
+- **Non-blocking**: a detector exception never kills the pipeline (`safeDetect` wrapper)
+- **Deterministic**: same candles always produce the same output
+- Requires at least 40 candles; returns `[]` otherwise
+
+### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `atr` | estimated from last 14 bars | ATR value for tolerance scaling |
+| `avgVolume` | `0` | 20-bar average volume (used for `volumeBonus`) |
+| `timeframe` | `null` | Timeframe label attached to output |
+| `lookback` | `5` | Pivot lookback window (bars on each side) |
+| `maxPatterns` | `5` | Maximum patterns returned (sorted by quality desc) |
+
+Pass `options.skipPatterns = true` to `analyzeMarket()` to bypass pattern detection entirely.
 
 ---
 
@@ -462,6 +551,69 @@ The bridge lives in `src/analyzer/marketContext.js`. Adjustment logic is in `com
 Planned future wiring:
 - Trending rank as a discovery signal for watchlist scans
 - Agent responses: "what is trending right now?"
+
+---
+
+## Bybit adapter
+
+An official read-only public market-data layer using the **Bybit V5 REST API**. TradingView remains the primary source of technical structure and signal logic. The Bybit adapter is additive — it is optional, and its absence does not affect the core analysis engine.
+
+### Purpose
+
+- Provides **official** perpetual/futures context directly from Bybit
+- Complements CoinGlass (which can be plan-restricted) as a funding/OI source
+- Designed for later wiring into the signal confidence pipeline
+
+### Available functions
+
+```js
+const {
+  getInstrumentInfo,
+  getTickerContext,
+  getFundingContext,
+  getOpenInterestContext,
+  getLongShortContext,
+} = require('./src/adapters/bybit');
+```
+
+| Function | Endpoint | Returns |
+|---|---|---|
+| `getInstrumentInfo(symbol, opts?)` | `/v5/market/instruments-info` | Contract metadata: category, status, tickSize, qtyStep, contractType |
+| `getTickerContext(symbol, opts?)` | `/v5/market/tickers` | Snapshot: lastPrice, markPrice, indexPrice, fundingRate, openInterest, basis, volume24h |
+| `getFundingContext(symbol, opts?)` | `/v5/market/funding/history` | currentFunding, averageFunding, fundingBias, fundingRegime |
+| `getOpenInterestContext(symbol, opts?)` | `/v5/market/open-interest` | currentOI, oiTrend, oiExpansion, oiRegime |
+| `getLongShortContext(symbol, opts?)` | `/v5/market/account-ratio` | longShortRatio (buyRatio), crowdBias, crowdingRisk |
+
+All functions accept symbols in any project format: `BTCUSDT`, `BTCUSDT.P`, `BINANCE:BTCUSDT.P`.
+
+### Environment variables
+
+```bash
+BYBIT_ENV=mainnet          # mainnet (default) | testnet
+BYBIT_BASE_URL=            # optional base URL override
+BYBIT_TIMEOUT_MS=10000     # optional request timeout
+```
+
+No API key required — all functions use public Bybit V5 endpoints.
+
+### Error classes
+
+| Class | Code | Cause |
+|---|---|---|
+| `MissingSymbolError` | `missing_symbol` | Symbol argument absent |
+| `InvalidSymbolError` | `invalid_symbol` | Symbol not found on Bybit |
+| `GeoRestrictedError` | `geo_restricted` | HTTP 403 — geo block |
+| `RateLimitedError` | `rate_limited` | HTTP 429 |
+| `UpstreamUnavailableError` | `upstream_unavailable` | HTTP 5xx |
+| `BybitTimeoutError` | `timeout` | Request timed out |
+| `InvalidResponseError` | `invalid_response` | Malformed V5 envelope |
+| `BybitApiError` | `api_error` | V5 retCode ≠ 0 |
+
+### Future work
+
+- **Signal engine wiring** — bridge funding/OI/LS into `src/analyzer/bybitContext.js` (analogous to `perpContext.js`) and wire confidence adjustments
+- **WebSocket** — `src/adapters/bybit/ws.js` for live ticker/orderbook streaming (`wss://stream.bybit.com/v5/public/linear`)
+- **Authenticated endpoints** — add `privateClient.js` with HMAC-SHA256 signing for orders, positions, and account management (future trading execution phase)
 
 ---
 

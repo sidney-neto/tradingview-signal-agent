@@ -39,7 +39,9 @@ const { classifyTrend, classifyMomentum, classifySignal, computePullbackContext 
 const { assessDataQuality, adjustConfidence } = require('../analyzer/scoring');
 const { buildSummary }                  = require('../analyzer/summary');
 const { fetchPerpContext }              = require('../analyzer/perpContext');
+const { fetchBybitContext, computeBybitContextAdjustment } = require('../analyzer/bybitContext');
 const { fetchMarketContext, computeMarketContextAdjustment } = require('../analyzer/marketContext');
+const { detectChartPatterns } = require('../analyzer/patterns');
 
 /**
  * @typedef {object} AnalyzeOptions
@@ -126,6 +128,20 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
     lookback:  defaults.ZONE_LOOKBACK,
   });
 
+  // --- 9b. Chart pattern detection (optional overlay, never throws) ---
+  let chartPatterns = [];
+  if (!options.skipPatterns) {
+    try {
+      chartPatterns = detectChartPatterns(candles, {
+        atr:        atr14,
+        avgVolume:  avgVol,
+        timeframe,
+      });
+    } catch (_) {
+      // Pattern detection is best-effort — never surface errors to callers
+    }
+  }
+
   // --- 10. Trend + momentum classification ---
   const trend = classifyTrend({
     price: currentPrice,
@@ -176,6 +192,11 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
   let perpContext    = null;
   let macroContext   = null;
   let cgProviderStatus = null;
+
+  // Bybit context (populated in step 12b.5)
+  let bybitContext            = null;
+  let bybitAdjustmentApplied = 0;
+  let bybitReasons           = [];
 
   // CoinGecko context (populated in step 12c)
   let marketBreadthContext  = null;
@@ -257,6 +278,70 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
     }
   }
 
+  // --- 12b.5. Optional Bybit perp context (additive overlay — fallback for CoinGlass) ---
+  //
+  // Only activated when CoinGlass did NOT provide perp context (perpContext === null),
+  // meaning COINGLASS_API_KEY is absent or the plan is restricted.
+  // This prevents double-counting funding/OI signals from two sources simultaneously.
+  //
+  // Uses public Bybit V5 endpoints — no API key required.
+  // Failures are fully absorbed; the engine degrades silently to the current confidence.
+  //
+  // Confidence is only adjusted for actionable bullish signals (pullback_watch, breakout_watch).
+  // For no_trade and bearish_breakdown_watch, bybitContext is populated for information only.
+  //
+  // Output fields:
+  //   bybitContext  — funding bias, OI regime, crowd context, mark price
+  //   confidenceBreakdown.bybitAdjustment — delta applied to confidence
+  const afterCGConfidence = confidence; // save before Bybit delta
+
+  if (!options.skipBybit && perpContext === null) {
+    try {
+      const bybitData = await fetchBybitContext(symbol.symbol, {
+        category:  options.bybitCategory,
+        timeoutMs: options.bybitTimeoutMs,
+      });
+
+      if (bybitData.available) {
+        const bybitResult = computeBybitContextAdjustment({
+          fundingBias: bybitData.fundingBias,
+          oiRegime:    bybitData.oiRegime,
+          signal,
+        });
+
+        const isBullishSetup = signal === 'pullback_watch' || signal === 'breakout_watch';
+        if (isBullishSetup && bybitResult.adjustment !== 0) {
+          confidence = round2(Math.min(1, Math.max(0, confidence + bybitResult.adjustment)));
+        }
+
+        bybitAdjustmentApplied = round2(confidence - afterCGConfidence);
+        bybitReasons           = bybitResult.reasons;
+
+        bybitContext = {
+          liveFundingRate:   bybitData.liveFundingRate,
+          averageFunding:    bybitData.averageFunding,
+          fundingBias:       bybitData.fundingBias,
+          fundingRegime:     bybitData.fundingRegime,
+          oiTrend:           bybitData.oiTrend,
+          oiExpansion:       bybitData.oiExpansion,
+          oiRegime:          bybitData.oiRegime,
+          crowdBias:         bybitData.crowdBias,
+          crowdingRisk:      bybitData.crowdingRisk,
+          markPrice:         bybitData.markPrice,
+          openInterest:      bybitData.openInterest,
+          openInterestValue: bybitData.openInterestValue,
+          contextAdjustment: isBullishSetup ? bybitAdjustmentApplied : 0,
+          reasons:           bybitReasons,
+          warnings:          bybitData.warnings,
+          source:            'bybit',
+        };
+      }
+    } catch (err) {
+      // Never surface Bybit errors to the caller — this is a best-effort overlay.
+      warnings.push(`Bybit context skipped: ${err.message}`);
+    }
+  }
+
   // --- 12c. Optional CoinGecko market breadth + trending context (additive overlay) ---
   //
   // Only attempted when COINGECKO_API_KEY is present in the environment.
@@ -304,18 +389,23 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
   }
 
   // Confidence breakdown — always present, regardless of overlay availability.
-  // Chain: base → afterQuality → cgAdjustment (CoinGlass) → cgkoAdjustment (CoinGecko) → final
-  const cgAdjustmentApplied = round2(afterCoinGlassConfidence - qualityAdjustedConfidence);
+  // Chain: base → afterQuality → cgAdjustment (CoinGlass) → bybitAdjustment (Bybit fallback) → cgkoAdjustment (CoinGecko) → final
+  // afterCGConfidence = confidence after CoinGlass block (before Bybit) — isolates cgAdjustment correctly.
+  // afterCoinGlassConfidence = confidence after Bybit block (before CoinGecko) — isolates cgkoAdjustment correctly.
+  const cgAdjustmentApplied = round2(afterCGConfidence - qualityAdjustedConfidence);
   const confidenceBreakdown = {
-    base:           baseConfidence,
-    afterQuality:   qualityAdjustedConfidence,
-    cgAdjustment:   cgAdjustmentApplied,
-    cgkoAdjustment: cgkoAdjustmentApplied,
-    final:          confidence,
-    cgAvailable:    perpContext !== null || macroContext !== null,
-    cgReason:       cgProviderStatus,
-    cgkoAvailable:  marketBreadthContext !== null || trendingContext !== null,
-    cgkoReasons:    cgkoReasons,
+    base:             baseConfidence,
+    afterQuality:     qualityAdjustedConfidence,
+    cgAdjustment:     cgAdjustmentApplied,
+    bybitAdjustment:  bybitAdjustmentApplied,
+    cgkoAdjustment:   cgkoAdjustmentApplied,
+    final:            confidence,
+    cgAvailable:      perpContext !== null || macroContext !== null,
+    cgReason:         cgProviderStatus,
+    bybitAvailable:   bybitContext !== null,
+    bybitReasons:     bybitReasons,
+    cgkoAvailable:    marketBreadthContext !== null || trendingContext !== null,
+    cgkoReasons:      cgkoReasons,
   };
 
   // --- 13. Summary ---
@@ -358,11 +448,13 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
     zoneState,
     perpContext,
     macroContext,
+    bybitContext,
     marketBreadthContext,
     trendingContext,
     confidenceBreakdown,
     dataQuality,
     warnings,
+    chartPatterns,
     candleCount:     candles.length,
     timestamp:       new Date().toISOString(),
   };
