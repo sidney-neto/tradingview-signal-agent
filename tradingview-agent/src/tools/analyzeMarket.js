@@ -22,26 +22,24 @@
  *     dataQuality, warnings }
  */
 
-const { resolveSymbol }   = require('../adapters/tradingview/symbolSearch');
-const { fetchCandles }    = require('../adapters/tradingview/candles');
 const { resolveTimeframe } = require('../utils/timeframes');
 const { validateAnalyzeParams } = require('../utils/validation');
 const defaults = require('../config/defaults');
+const logger   = require('../logger');
 
-const { multiEma, multiSma, lastValue } = require('../analyzer/indicators');
-const { rsi: computeRsi }               = require('../analyzer/rsi');
-const { atr: computeAtr, classifyVolatility } = require('../analyzer/atr');
-const { avgVolume, classifyVolume }     = require('../analyzer/volume');
-const { detectPivots }                  = require('../analyzer/pivots');
-const { analyzeTrendlines }             = require('../analyzer/trendlines');
-const { detectZone }                    = require('../analyzer/zones');
-const { classifyTrend, classifyMomentum, classifySignal, computePullbackContext } = require('../analyzer/rules');
-const { assessDataQuality, adjustConfidence } = require('../analyzer/scoring');
-const { buildSummary }                  = require('../analyzer/summary');
-const { fetchPerpContext }              = require('../analyzer/perpContext');
-const { fetchBybitContext, computeBybitContextAdjustment } = require('../analyzer/bybitContext');
-const { fetchMarketContext, computeMarketContextAdjustment } = require('../analyzer/marketContext');
-const { detectChartPatterns } = require('../analyzer/patterns');
+const { computePullbackContext }         = require('../analyzer/rules');
+const { buildSummary }                   = require('../analyzer/summary');
+const { computeBybitContextAdjustment }  = require('../analyzer/bybitContext');
+const { computeMarketContextAdjustment } = require('../analyzer/marketContext');
+const { computeAnalysisPipeline }        = require('../analyzer/pipeline');
+
+// TTL-cached wrappers for network I/O — fall through to originals when cache is disabled.
+// Set CACHE_ENABLED=true to activate; see src/cache/ for TTL env vars.
+const { resolveSymbolCached: resolveSymbol }             = require('../cache/symbolCache');
+const { fetchCandlesCached: fetchCandles }               = require('../cache/candleCache');
+const { fetchPerpContextCached: fetchPerpContext }       = require('../cache/overlayCache');
+const { fetchBybitContextCached: fetchBybitContext }     = require('../cache/overlayCache');
+const { fetchMarketContextCached: fetchMarketContext }   = require('../cache/overlayCache');
 
 /**
  * @typedef {object} AnalyzeOptions
@@ -67,128 +65,81 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
 
   const tvTimeframe = resolveTimeframe(timeframe);
 
+  logger.info('analysis.start', { query, timeframe });
+
   // --- 2. Resolve symbol ---
   const symbol = await resolveSymbol(query, {
     filter: options.symbolFilter || '',
   });
 
   // --- 3. Fetch candles ---
-  const candles = await fetchCandles(symbol.id, tvTimeframe, {
-    candleCount: options.candleCount || defaults.CANDLE_COUNT,
-    timeoutMs:   options.timeoutMs   || defaults.CANDLE_FETCH_TIMEOUT_MS,
-    minCandles:  defaults.MIN_CANDLES,
-    token:       options.token,
-    signature:   options.signature,
-  });
-
-  // --- 4. Extract close/high/low/vol series ---
-  const closes  = candles.map((c) => c.close);
-  const currentPrice = closes[closes.length - 1];
-
-  // --- 5. Compute indicators ---
-  const emaMap  = multiEma(closes, defaults.EMA_PERIODS);
-  const smaMap  = multiSma(closes, defaults.SMA_PERIODS);
-  const rsiSeries  = computeRsi(closes, defaults.RSI_PERIOD);
-  const atrSeries  = computeAtr(candles, defaults.ATR_PERIOD);
-  const avgVolSeries = avgVolume(candles, defaults.AVG_VOLUME_PERIOD);
-
-  const ema20  = lastValue(emaMap[20]);
-  const ema50  = lastValue(emaMap[50]);
-  const ema100 = lastValue(emaMap[100]);
-  const ema200 = lastValue(emaMap[200]);
-  const ma200  = lastValue(smaMap[200]);
-  const rsi14  = lastValue(rsiSeries);
-  const atr14  = lastValue(atrSeries);
-  const avgVol = lastValue(avgVolSeries);
-  const currentVolume = candles[candles.length - 1].volume;
-
-  const indicators = { ema20, ema50, ema100, ema200, ma200, rsi14, avgVolume20: avgVol, atr14 };
-
-  // --- 6. Volume + volatility classification ---
-  const volumeState     = classifyVolume(currentVolume, avgVol);
-  const volatilityState = classifyVolatility(atr14, currentPrice);
-
-  // --- 7. Pivot detection ---
-  const { pivotHighs, pivotLows } = detectPivots(candles, defaults.PIVOT_LOOKBACK);
-
-  // --- 8. Trendline analysis ---
-  const trendlineState = analyzeTrendlines({
-    pivotHighs,
-    pivotLows,
-    candles,
-    currentPrice,
-    atrValue: atr14,
-  });
-
-  // --- 9. Zone detection ---
-  const zoneState = detectZone({
-    candles,
-    atrValue:  atr14,
-    atrSeries,
-    lookback:  defaults.ZONE_LOOKBACK,
-  });
-
-  // --- 9b. Chart pattern detection (optional overlay, never throws) ---
-  let chartPatterns = [];
-  if (!options.skipPatterns) {
-    try {
-      chartPatterns = detectChartPatterns(candles, {
-        atr:        atr14,
-        avgVolume:  avgVol,
-        timeframe,
-      });
-    } catch (_) {
-      // Pattern detection is best-effort — never surface errors to callers
-    }
+  let candles;
+  try {
+    candles = await fetchCandles(symbol.id, tvTimeframe, {
+      candleCount: options.candleCount || defaults.CANDLE_COUNT,
+      timeoutMs:   options.timeoutMs   || defaults.CANDLE_FETCH_TIMEOUT_MS,
+      minCandles:  defaults.MIN_CANDLES,
+      token:       options.token,
+      signature:   options.signature,
+    });
+  } catch (err) {
+    logger.error('candle.fetch.failed', { symbolId: symbol.id, timeframe, error: err.message, code: err.code || null });
+    throw err;
   }
 
-  // --- 10. Trend + momentum classification ---
-  const trend = classifyTrend({
+  // --- 4–12. Core candle-based analysis (shared deterministic pipeline) ---
+  const core = computeAnalysisPipeline({
+    candles,
+    symbol:  symbol.symbol,
+    timeframe,
+    options: { skipPatterns: options.skipPatterns },
+  });
+
+  // Log pattern detection failures surfaced by the pipeline (it is silent by design).
+  const patternWarn = core.warnings.find((w) => w.startsWith('pattern_detection_failed'));
+  if (patternWarn) logger.warn('pattern.detection.failed', { error: patternWarn });
+
+  const {
     price: currentPrice,
-    ema20, ema50, ema100, ema200, ma200,
-    trendlineState,
-  });
-
-  const momentum = classifyMomentum({
-    rsi14,
-    volumeState,
-    trendlineBreak: trendlineState.lineBreakDirection,
-    zoneType:       zoneState.zoneType,
-  });
-
-  // --- 11. Signal classification ---
-  const { signal, confidence: baseConfidence, invalidation, targets } = classifySignal({
-    trend, momentum, volumeState, volatilityState,
-    trendlineState, zoneState,
-    indicators,      // needed by isValidBullishPullback for EMA/ATR proximity checks
-    currentPrice,    // needed by isValidBullishPullback for price-vs-EMA comparisons
-  });
-
-  // --- 12. Data quality + confidence adjustment ---
-  const { score: dataQuality, warnings } = assessDataQuality({
     indicators,
+    volumeState,
+    volatilityState,
     trendlineState,
     zoneState,
-    candleCount: candles.length,
-  });
+    chartPatterns,
+    trend,
+    momentum,
+    signal,
+    baseConfidence,
+    dataQuality,
+    invalidation,
+    targets,
+  } = core;
 
-  let confidence = adjustConfidence(baseConfidence, dataQuality);
-  const qualityAdjustedConfidence = confidence; // save for breakdown before CG delta
+  const warnings = core.warnings;           // mutable; overlays will push to this
+  let confidence = core.confidence;         // quality-adjusted; overlays modify this
+  const qualityAdjustedConfidence = confidence;
 
   // --- 12b. Optional CoinGlass perp context (additive overlay) ---
   //
   // Only attempted when COINGLASS_API_KEY is present in the environment.
   // If the key is absent or any request fails, the engine degrades to the
-  // quality-adjusted confidence above — no exception is ever surfaced to callers.
+  // quality-adjusted confidence above — the failure surfaces in warnings[] and logs.
+  //
+  // PARALLELIZATION: CoinGecko fetch is started here concurrently with the
+  // CoinGlass+Bybit chain. CoinGecko is independent of both and does not need
+  // to wait for perp context to be resolved.
   //
   // Confidence is only adjusted for actionable bullish signals (pullback_watch,
   // breakout_watch). For no_trade and bearish_breakdown_watch, perpContext and
   // macroContext are populated for information but confidence is left unchanged.
-  //
-  // Output fields:
-  //   perpContext   — funding + OI context, partial adjustment, reasons
-  //   macroContext  — fearGreed + BTC dominance + altcoin season, partial adjustment, reasons
-  //   confidenceBreakdown — full chain: base → afterQuality → cgAdjustment → final
+
+  // Start CoinGecko in the background immediately — it is independent of CoinGlass/Bybit.
+  // We will await this promise after the CoinGlass+Bybit chain completes.
+  const cgkoFetchPromise = (!options.skipCoinGecko)
+    ? fetchMarketContext(symbol.symbol, { timeoutMs: options.cgkoTimeoutMs })
+    : Promise.resolve(null);
+
   let perpContext    = null;
   let macroContext   = null;
   let cgProviderStatus = null;
@@ -204,7 +155,7 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
   let cgkoAdjustmentApplied = 0;
   let cgkoReasons           = [];
 
-  // Shared helpers for confidence adjustment arithmetic (used by both CoinGlass and CoinGecko blocks)
+  // Shared helpers for confidence adjustment arithmetic
   const round2 = (n) => Math.round(n * 100) / 100;
 
   // Parse the signed delta embedded at the end of each reason string.
@@ -273,7 +224,8 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
         };
       }
     } catch (err) {
-      // Never surface CoinGlass errors to the caller — this is a best-effort overlay.
+      // Failure is surfaced as a warning + log; pipeline continues with degraded confidence.
+      logger.warn('overlay.fetch.failed', { source: 'coinglass', error: err.message });
       warnings.push(`CoinGlass context skipped: ${err.message}`);
     }
   }
@@ -285,14 +237,7 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
   // This prevents double-counting funding/OI signals from two sources simultaneously.
   //
   // Uses public Bybit V5 endpoints — no API key required.
-  // Failures are fully absorbed; the engine degrades silently to the current confidence.
-  //
-  // Confidence is only adjusted for actionable bullish signals (pullback_watch, breakout_watch).
-  // For no_trade and bearish_breakdown_watch, bybitContext is populated for information only.
-  //
-  // Output fields:
-  //   bybitContext  — funding bias, OI regime, crowd context, mark price
-  //   confidenceBreakdown.bybitAdjustment — delta applied to confidence
+  // Failures are surfaced in warnings[] and logs; pipeline continues.
   const afterCGConfidence = confidence; // save before Bybit delta
 
   if (!options.skipBybit && perpContext === null) {
@@ -337,61 +282,53 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
         };
       }
     } catch (err) {
-      // Never surface Bybit errors to the caller — this is a best-effort overlay.
+      // Failure is surfaced as a warning + log; pipeline continues.
+      logger.warn('overlay.fetch.failed', { source: 'bybit', error: err.message });
       warnings.push(`Bybit context skipped: ${err.message}`);
     }
   }
 
   // --- 12c. Optional CoinGecko market breadth + trending context (additive overlay) ---
   //
-  // Only attempted when COINGECKO_API_KEY is present in the environment.
-  // Failures are fully absorbed — neither field ever breaks the main pipeline.
+  // cgkoFetchPromise was started before the CoinGlass/Bybit chain so that CoinGecko
+  // runs concurrently. We await it here — it is likely already settled by this point.
   //
   // Confidence is only adjusted for altcoin pullback_watch and breakout_watch signals.
-  // BTC and ETH are excluded (breadth is self-referential for majors).
-  // For no_trade and bearish_breakdown_watch, context fields are populated for
-  // information only — confidence is left unchanged.
-  //
-  // Output fields:
-  //   marketBreadthContext — broad market regime snapshot
-  //   trendingContext      — whether the asset is currently trending on CoinGecko
-  //   confidenceBreakdown  — cgkoAdjustment + cgkoReasons fields added
+  // Failures are surfaced in warnings[] and logs.
   const afterCoinGlassConfidence = confidence; // save before CoinGecko delta
 
   if (!options.skipCoinGecko) {
     try {
-      const cgkoData = await fetchMarketContext(symbol.symbol, {
-        timeoutMs: options.cgkoTimeoutMs,
-      });
-      marketBreadthContext = cgkoData.marketBreadthContext;
-      trendingContext      = cgkoData.trendingContext;
+      const cgkoData = await cgkoFetchPromise;
+      if (cgkoData !== null) {
+        marketBreadthContext = cgkoData.marketBreadthContext;
+        trendingContext      = cgkoData.trendingContext;
 
-      // Apply adjustment only when at least one context field is available
-      if (marketBreadthContext !== null || trendingContext !== null) {
-        const cgkoResult = computeMarketContextAdjustment({
-          breadthContext: marketBreadthContext,
-          trendingCtx:    trendingContext,
-          signal,
-          symbol:         symbol.symbol,
-        });
+        if (marketBreadthContext !== null || trendingContext !== null) {
+          const cgkoResult = computeMarketContextAdjustment({
+            breadthContext: marketBreadthContext,
+            trendingCtx:    trendingContext,
+            signal,
+            symbol:         symbol.symbol,
+          });
 
-        if (cgkoResult.adjustment !== 0) {
-          confidence = round2(Math.min(1, Math.max(0, confidence + cgkoResult.adjustment)));
+          if (cgkoResult.adjustment !== 0) {
+            confidence = round2(Math.min(1, Math.max(0, confidence + cgkoResult.adjustment)));
+          }
+
+          cgkoAdjustmentApplied = round2(confidence - afterCoinGlassConfidence);
+          cgkoReasons           = cgkoResult.reasons;
         }
-
-        cgkoAdjustmentApplied = round2(confidence - afterCoinGlassConfidence);
-        cgkoReasons           = cgkoResult.reasons;
       }
     } catch (err) {
-      // Never surface CoinGecko errors to the caller.
+      // Failure is surfaced as a warning + log; pipeline continues.
+      logger.warn('overlay.fetch.failed', { source: 'coingecko', error: err.message });
       warnings.push(`CoinGecko context skipped: ${err.message}`);
     }
   }
 
   // Confidence breakdown — always present, regardless of overlay availability.
   // Chain: base → afterQuality → cgAdjustment (CoinGlass) → bybitAdjustment (Bybit fallback) → cgkoAdjustment (CoinGecko) → final
-  // afterCGConfidence = confidence after CoinGlass block (before Bybit) — isolates cgAdjustment correctly.
-  // afterCoinGlassConfidence = confidence after Bybit block (before CoinGecko) — isolates cgkoAdjustment correctly.
   const cgAdjustmentApplied = round2(afterCGConfidence - qualityAdjustedConfidence);
   const confidenceBreakdown = {
     base:             baseConfidence,
@@ -424,6 +361,16 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
     zoneState,
     targets,
     invalidation,
+  });
+
+  logger.info('analysis.complete', {
+    query,
+    timeframe,
+    symbol: symbol.symbol,
+    signal,
+    confidence,
+    dataQuality,
+    warningCount: warnings.length,
   });
 
   // --- 14. Return structured result ---

@@ -1,29 +1,8 @@
-# TradingView adapter instructions
+# src/tradingview/ — Legacy placeholder
 
-## Goal
-This directory is the integration boundary with ../tradingview-api.
+This directory is empty and should not be used.
 
-## Rules
-- Build a thin adapter layer.
-- Normalize outputs returned by the library.
-- Avoid leaking internal library structures to the rest of the app.
-- Prefer stable public APIs from tradingview-api.
-- Do not copy core logic from tradingview-api unless absolutely necessary.
+The TradingView adapter has moved to `src/adapters/tradingview/`.
 
-## Responsibilities
-This directory should handle:
-- symbol normalization
-- timeframe normalization
-- market data retrieval
-- chart/candle retrieval
-- indicator/study retrieval
-- conversion into app-friendly objects
-
-## Output preference
-Functions in this directory should return normalized data structures that are safe for:
-- analyzer/
-- api/
-- bot/
-
-## Important
-If tradingview-api behavior is unclear, inspect examples and tests first before adding workarounds.
+All work on TradingView integration (symbol resolution, candle fetching, normalization, error classes)
+belongs in `src/adapters/tradingview/`. See that directory for current guidance.

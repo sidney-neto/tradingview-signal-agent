@@ -26,6 +26,7 @@
  */
 
 const { detectPivots } = require('../pivots');
+const logger = require('../../logger');
 
 const { detectHeadAndShoulders, detectInverseHeadAndShoulders } = require('./headShoulders');
 const { detectDoubleTop, detectDoubleBottom }                   = require('./doubleTopBottom');
@@ -51,7 +52,13 @@ const DEFAULT_MAX_PATTERNS = 5;
 function safeDetect(detectorFn, args) {
   try {
     return detectorFn(...args);
-  } catch (_) {
+  } catch (err) {
+    // Individual detector failures are logged at debug level and swallowed so
+    // that a single broken detector cannot kill the entire pattern pipeline.
+    logger.debug('pattern.detector.failed', {
+      detector: detectorFn.name || 'unknown',
+      error:    err.message,
+    });
     return null;
   }
 }

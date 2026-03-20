@@ -1,28 +1,22 @@
-# Bot instructions
+# src/bot/ — Telegram bot
 
-## Goal
-Implement a simple Telegram interface for the MVP market-analysis service.
+## Status
 
-## Scope
-This directory should only handle:
-- Telegram command parsing
-- user-facing message formatting
-- API/analyzer invocation
-- friendly error responses
+**Not yet implemented.** This directory is a placeholder.
 
-## Rules
-- Do not place market-analysis logic here.
-- Do not directly depend on low-level tradingview-api internals here.
-- Keep commands simple and predictable.
+The delivery layer (`src/delivery/`) already handles sending analysis results to Telegram after webhook events. The bot layer is intended for interactive command-based usage.
 
-## MVP commands
-- /start
-- /help
-- /analyze SYMBOL TIMEFRAME
+## Planned scope
 
-## Output style
-Responses should be:
-- concise
-- structured
-- easy to read on mobile
-- explicit when data retrieval fails
+When implemented, this layer should only handle:
+- Telegram command parsing (`/analyze SYMBOL TIMEFRAME`, `/help`, `/start`)
+- Invoking `analyzeMarket` or `analyzeMarketMTF`
+- Formatting responses for Telegram (reuse `src/delivery/formatter.js` where possible)
+- Returning friendly error messages
+
+## Rules (when implemented)
+
+- No market analysis logic here — call `analyzeMarket` / `analyzeMarketMTF` from `src/tools/`
+- No direct dependency on `@mathieuc/tradingview` internals
+- No signal rules inside the bot layer
+- Reuse PT-BR formatting from `src/delivery/formatter.js` and `src/analyzer/summary.js`
