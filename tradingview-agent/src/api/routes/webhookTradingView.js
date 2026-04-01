@@ -44,18 +44,29 @@ const { analyzeMarket }   = require('../../tools/analyzeMarket');
 const { getSupportedTimeframes } = require('../../utils/timeframes');
 const { deliverAnalysis } = require('../../delivery');
 
-const DEDUP_TTL_MS = parseInt(process.env.WEBHOOK_DEDUP_TTL_MS || '10000', 10);
+const DEDUP_TTL_MS          = parseInt(process.env.WEBHOOK_DEDUP_TTL_MS          || '10000',  10);
+const NO_TRADE_DEDUP_TTL_MS = parseInt(process.env.WEBHOOK_NO_TRADE_DEDUP_TTL_MS || '300000', 10); // 5 min default
+const SUPPRESS_NO_TRADE     = (process.env.WEBHOOK_SUPPRESS_NO_TRADE || '').toLowerCase() === 'true';
 
-// In-memory dedup store: key → expiry timestamp.
-// Intentionally simple — no Redis required. Document limitation: resets on restart.
+// Analysis-level dedup store: prevents redundant analysis runs for exact repeats.
+// Key: SHA256(query|timeframe|null), Value: expiry timestamp.
+// Intentionally simple — no Redis required. Resets on restart (by design).
 const dedupStore = new Map();
 
-// Sweep expired dedup entries every 60 s to prevent unbounded growth.
-if (DEDUP_TTL_MS > 0) {
+// Delivery-level dedup store: prevents repeated deliveries of the same signal.
+// Key: SHA256(query|timeframe|signal), Value: expiry timestamp.
+// no_trade uses a much longer TTL to reduce operational noise.
+const deliveryDedupStore = new Map();
+
+// Sweep both stores every 60 s to prevent unbounded growth.
+if (DEDUP_TTL_MS > 0 || NO_TRADE_DEDUP_TTL_MS > 0) {
   setInterval(() => {
     const now = Date.now();
     for (const [k, exp] of dedupStore.entries()) {
       if (exp <= now) dedupStore.delete(k);
+    }
+    for (const [k, exp] of deliveryDedupStore.entries()) {
+      if (exp <= now) deliveryDedupStore.delete(k);
     }
   }, 60_000).unref();
 }
@@ -120,10 +131,22 @@ function normalizePayload(body) {
 }
 
 /**
- * Build a short dedup key for (query, timeframe).
+ * Build a short dedup key for (query, timeframe, signal).
+ * Including signal allows the same (query, timeframe) pair to fire a new alert
+ * when the signal changes (e.g., from no_trade to breakout_watch).
+ * Pass signal=null for the pre-analysis analysis dedup check.
+ *
+ * @param {string}      query
+ * @param {string}      timeframe
+ * @param {string|null} signal  - optional signal type from analysis result
+ * @returns {string} hex hash prefix
  */
-function dedupKey(query, timeframe) {
-  return crypto.createHash('sha256').update(`${query}|${timeframe}`).digest('hex').slice(0, 16);
+function dedupKey(query, timeframe, signal) {
+  const sigPart = signal || 'unknown';
+  return crypto.createHash('sha256')
+    .update(`${query}|${timeframe}|${sigPart}`)
+    .digest('hex')
+    .slice(0, 16);
 }
 
 /**
@@ -160,7 +183,7 @@ async function handleWebhook(req, res) {
   // ── De-duplication ───────────────────────────────────────────────────────
 
   if (DEDUP_TTL_MS > 0) {
-    const key     = dedupKey(query, timeframe);
+    const key     = dedupKey(query, timeframe, null);  // signal unknown at this point
     const now     = Date.now();
     const expiry  = dedupStore.get(key);
 
@@ -213,22 +236,64 @@ async function handleWebhook(req, res) {
     durationMs,
   });
 
+  // ── Post-analysis delivery policy ────────────────────────────────────────
+  //
+  // 1. Suppress no_trade delivery if WEBHOOK_SUPPRESS_NO_TRADE=true.
+  // 2. Deduplicate repeated same-signal deliveries with a per-signal TTL.
+  //    no_trade uses a longer TTL (NO_TRADE_DEDUP_TTL_MS, default 5 min).
+  //    Other signals use the standard DEDUP_TTL_MS.
+
+  let skipDelivery = false;
+  let skipReason   = null;
+
+  if (analysis.signal === 'no_trade' && SUPPRESS_NO_TRADE) {
+    skipDelivery = true;
+    skipReason   = 'no_trade_suppressed';
+  } else {
+    const delivTtl = analysis.signal === 'no_trade'
+      ? NO_TRADE_DEDUP_TTL_MS
+      : DEDUP_TTL_MS;
+
+    if (delivTtl > 0) {
+      const delivKey = dedupKey(query, timeframe, analysis.signal);
+      const now      = Date.now();
+      const delivExp = deliveryDedupStore.get(delivKey);
+      if (delivExp && delivExp > now) {
+        skipDelivery = true;
+        skipReason   = `signal_dedup(${analysis.signal})`;
+        logger.info('webhook.delivery_dedup', {
+          correlationId, query, timeframe, signal: analysis.signal,
+          ttlRemainingS: Math.ceil((delivExp - now) / 1000),
+        });
+      } else {
+        deliveryDedupStore.set(delivKey, now + delivTtl);
+      }
+    }
+  }
+
   // ── Delivery (non-fatal) ─────────────────────────────────────────────────
   // Fire-and-await delivery before responding so the response includes
   // delivery results. Failures are isolated and never affect HTTP 200 status.
 
   let delivery = [];
-  try {
-    delivery = await deliverAnalysis({
-      source:       'tradingview_webhook',
-      request:      { query, timeframe },
-      analysis,
-      rawPayload:   req.body,
-      warnings:     analysis.warnings || [],
-      correlationId,
+  if (!skipDelivery) {
+    try {
+      delivery = await deliverAnalysis({
+        source:       'tradingview_webhook',
+        request:      { query, timeframe },
+        analysis,
+        rawPayload:   req.body,
+        warnings:     analysis.warnings || [],
+        correlationId,
+      });
+    } catch (err) {
+      logger.error('webhook.delivery_crash', { correlationId, error: err.message });
+    }
+  } else {
+    delivery = [{ provider: 'none', attempted: false, success: false, error: skipReason }];
+    logger.info('webhook.delivery_skipped', {
+      correlationId, query, timeframe, signal: analysis.signal, skipReason,
     });
-  } catch (err) {
-    logger.error('webhook.delivery_crash', { correlationId, error: err.message });
   }
 
   return res.status(200).json({

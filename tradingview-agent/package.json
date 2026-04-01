@@ -12,7 +12,7 @@
     "express": "^5.2.1"
   },
   "scripts": {
-    "test": "node --env-file=.env test/smoke.js",
+    "test": "node test/smoke.js",
     "start": "node --env-file=.env",
     "start:api": "node --env-file=.env src/api/index.js",
     "backtest": "node scripts/backtest.js"

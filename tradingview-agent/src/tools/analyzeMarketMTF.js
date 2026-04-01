@@ -31,6 +31,8 @@ const { analyzeMarket } = require('./analyzeMarket');
 const { buildMTFSummary } = require('../analyzer/formatMTF');
 const { getSupportedTimeframes } = require('../utils/timeframes');
 const logger = require('../logger');
+const { computeMtfQualification }   = require('../analyzer/mtfQualification');
+const { computeTradeQualification } = require('../analyzer/tradeQualification');
 
 /**
  * Run analyzeMarket for each timeframe concurrently and aggregate results.
@@ -85,6 +87,49 @@ async function analyzeMarketMTF({ query, timeframes, options = {} }) {
       logger.warn('analysis.mtf.timeframe.failed', { query, timeframe: tf, error: err.message });
     }
   });
+
+  // --- MTF qualification (for each TF, qualify its setup against higher TFs) ---
+  //
+  // For each successful TF result, compute mtfQualification using the other
+  // successful TF results as context. Then re-compute tradeQualification for
+  // that TF with the MTF context filled in.
+  //
+  // This allows the consumer of analyzeMarketMTF to see which TFs have
+  // MTF-confirmed setups and which are counter to higher structure.
+
+  for (const tf of uniqueTimeframes) {
+    const tfResult = results[tf];
+    if (!tfResult) continue;
+
+    const mtfQ = computeMtfQualification({
+      baseTimeframe: tf,
+      baseSignal:    tfResult.signal,
+      mtfResults:    results,  // all TF results (base TF's own entry is ignored by rank filter)
+    });
+
+    // Re-compute tradeQualification with MTF context now available
+    const tq = computeTradeQualification({
+      signal:           tfResult.signal,
+      confidence:       tfResult.confidence,
+      trend:            tfResult.trend,
+      momentum:         tfResult.momentum,
+      indicators:       tfResult.indicators,
+      currentPrice:     tfResult.price,
+      trendlineState:   tfResult.trendlineState,
+      zoneState:        tfResult.zoneState,
+      volumeState:      tfResult.volumeState,
+      volatilityState:  tfResult.volatilityState,
+      mtfQualification: mtfQ,
+      marketRegime:     null,  // filled in Phase D
+    });
+
+    // Attach both to the TF result (results[tf] is a reference, mutation is safe here)
+    results[tf] = {
+      ...results[tf],
+      mtfQualification: mtfQ,
+      tradeQualification: tq,
+    };
+  }
 
   // --- Build formatted MTF summary from successful results ---
   // buildMTFSummary expects results ordered shortest → longest TF.
