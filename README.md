@@ -1,187 +1,220 @@
-# tradingview-agent
+# tradingview-signal-agent
 
-Deterministic market analysis engine for conversational AI agents.
+Deterministic crypto market analysis engine built on top of TradingView candle data.
 
-Built as an application layer over the [TradingView API](https://github.com/Mathieu2301/TradingView-API)
-WebSocket client. Designed to be called by an OpenClaw agent or any AI orchestration layer.
+It is designed for AI agents, webhook-driven workflows, and automation that need structured signal analysis instead of opaque text output.
 
----
+## 📌 What This Project Is
 
-## What it does
+This project is a Node.js workspace whose runnable package lives in [`tradingview-agent/`](tradingview-agent/).
 
-Given a symbol query and timeframe, `analyzeMarket()` returns a fully structured, deterministic analysis:
+At a high level, it:
 
-- **Trend classification** — EMA stack (20/50/100/200), SMA200
-- **Momentum classification** — RSI14, volume state, trendline breaks
-- **Signal detection** — `breakout_watch`, `pullback_watch`, `bearish_breakdown_watch`, `no_trade`
-- **Confidence scoring** — base score + data quality adjustment + optional overlays
-- **Trendline analysis** — pivot-based up/down trendline construction + break detection
-- **Zone detection** — consolidation and accumulation zones
-- **Optional overlays** — CoinGlass perp context, CoinGecko market breadth (graceful fallback when keys absent)
-- **PT-BR summaries** — structured, mobile-friendly output for Telegram / agent responses
+- fetches OHLCV candles from TradingView
+- runs a deterministic technical analysis pipeline locally
+- classifies trend, momentum, volatility, and signal state
+- optionally enriches the result with market context from CoinGlass, CoinGecko, and Bybit
+- exposes the result through code, REST endpoints, and TradingView webhook ingestion
 
----
+Typical outputs include:
 
-## Structure
+- `breakout_watch`
+- `pullback_watch`
+- `bearish_breakdown_watch`
+- `no_trade`
 
-```
-tradingview-agent/              ← this repo
-├── package.json
-├── .env.example
-├── src/
-│   ├── adapters/
-│   │   ├── tradingview/        ← thin adapter over @mathieuc/tradingview
-│   │   │   ├── symbolSearch.js ← resolves query → symbolId
-│   │   │   ├── candles.js      ← fetches OHLCV via WebSocket
-│   │   │   ├── normalize.js
-│   │   │   └── errors.js
-│   │   ├── coinglass/          ← optional perp/macro context
-│   │   │   ├── client.js
-│   │   │   ├── funding.js
-│   │   │   ├── openInterest.js
-│   │   │   ├── macro.js        ← fear & greed, BTC dominance, altcoin season
-│   │   │   └── ...
-│   │   └── coingecko/          ← optional market breadth + trending
-│   │       ├── client.js
-│   │       ├── markets.js      ← top-50 gainers/losers → risk_on / risk_off
-│   │       ├── trending.js
-│   │       └── ...
-│   ├── analyzer/
-│   │   ├── indicators.js       ← EMA, SMA
-│   │   ├── rsi.js              ← RSI (Wilder smoothing)
-│   │   ├── atr.js              ← ATR + volatility classification
-│   │   ├── volume.js           ← average volume + state classification
-│   │   ├── pivots.js           ← pivot high/low detection
-│   │   ├── trendlines.js       ← trendline construction + break detection
-│   │   ├── zones.js            ← consolidation + accumulation zones
-│   │   ├── rules.js            ← trend, momentum, signal classification
-│   │   ├── scoring.js          ← data quality + confidence adjustment
-│   │   ├── summary.js          ← PT-BR summary builder
-│   │   ├── formatMTF.js        ← multi-timeframe formatter
-│   │   ├── perpContext.js      ← CoinGlass bridge
-│   │   └── marketContext.js    ← CoinGecko bridge
-│   ├── config/
-│   │   └── defaults.js
-│   ├── tools/
-│   │   ├── analyzeMarket.js    ← main pipeline function
-│   │   └── openclawAnalyzeMarket.js  ← OpenClaw tool wrapper
-│   └── utils/
-│       ├── timeframes.js
-│       └── validation.js
-└── test/
-    └── smoke.js                ← 27 deterministic smoke tests
-```
+## ⚙️ How The Project Works
 
----
+The core flow is:
 
-## Quick start
+1. A symbol query such as `BTC`, `ETHUSDT`, or `BINANCE:BTCUSDT.P` is received.
+2. The TradingView adapter resolves that query into a market symbol.
+3. The TradingView candle adapter fetches recent candles over WebSocket.
+4. The local analyzer computes indicators, pivots, trendlines, zones, patterns, trend, momentum, and signal.
+5. Optional context layers adjust or enrich the output:
+   - CoinGlass: perp and macro context
+   - CoinGecko: breadth and trending context
+   - Bybit: public perp context fallback
+6. The final response is returned as a structured JSON object or delivered through webhook-connected channels.
 
-```bash
-npm install
-npm test        # run smoke tests (no network required)
-```
+Core modules:
 
-### Using the tool
+- `tradingview-agent/src/tools/analyzeMarket.js`: main single-timeframe entrypoint
+- `tradingview-agent/src/tools/analyzeMarketMTF.js`: multi-timeframe wrapper
+- `tradingview-agent/src/analyzer/pipeline.js`: deterministic analysis core
+- `tradingview-agent/src/api/`: REST API and TradingView webhook ingestion
+- `tradingview-agent/src/delivery/`: Telegram and OpenClaw delivery layer
+- `tradingview-agent/src/backtest/`: replay/backtest utilities for fixture-based validation
+
+## 🧪 Usage Examples
+
+### 1. Use from code
 
 ```js
-const { analyzeMarket } = require('./src/tools/analyzeMarket');
+const { analyzeMarket } = require('./tradingview-agent/src/tools/analyzeMarket');
 
-const result = await analyzeMarket({ query: 'BTC', timeframe: '4h' });
-console.log(result.signal);     // 'breakout_watch' | 'pullback_watch' | ...
-console.log(result.confidence); // 0.0 – 1.0
-console.log(result.summary);    // structured PT-BR text block
+async function run() {
+  const result = await analyzeMarket({
+    query: 'BTC',
+    timeframe: '1h',
+  });
+
+  console.log(result.signal);
+  console.log(result.confidence);
+  console.log(result.summary);
+}
+
+run().catch(console.error);
 ```
 
-### OpenClaw wrapper
+### 2. Use through the API
 
-```js
-const { runAnalyzeTool } = require('./src/tools/openclawAnalyzeMarket');
-
-const result = await runAnalyzeTool({ query: 'LINK', timeframe: '1h' });
-if (result.ok) console.log(result.data);
-else console.error(result.error.type, result.error.message);
-```
-
----
-
-## Environment variables
-
-All keys are optional. Copy `.env.example` to `.env` and fill in what you want.
+Start the API from the package directory:
 
 ```bash
-cp .env.example .env
+cd tradingview-agent
+API_KEY=your_secret npm run start:api
 ```
 
-| Variable | Required | Description |
-|---|---|---|
-| `COINGLASS_API_KEY` | No | Enables perp context overlay (funding, OI, macro) |
-| `COINGECKO_API_KEY` | No | Enables market breadth + trending overlay |
-| `COINGECKO_API_TIER` | No | `demo` (default) or `paid` |
-| `SESSION` | No | TradingView session cookie (authenticated features only) |
-| `SIGNATURE` | No | TradingView signature cookie |
+Then call the analysis endpoint:
 
-If a key is absent, the corresponding overlay is silently skipped — confidence uses the base + quality-adjusted score only.
+```bash
+curl -X POST http://localhost:3000/analyze \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: your_secret" \
+  -d '{"query":"BTC","timeframe":"1h"}'
+```
 
----
+### 3. Use multi-timeframe analysis
 
-## Dependencies
+```js
+const { analyzeMarketMTF } = require('./tradingview-agent/src/tools/analyzeMarketMTF');
 
-| Package | Purpose |
-|---|---|
-| [`@mathieuc/tradingview`](https://github.com/Mathieu2301/TradingView-API) | TradingView WebSocket client — OHLCV data, symbol search |
+async function run() {
+  const result = await analyzeMarketMTF({
+    query: 'ETH',
+    timeframes: ['1h', '4h', '1d'],
+  });
 
-### Local development against a cloned tradingview-api
+  console.log(result.mtfSummary);
+}
 
-If you have `tradingview-api` cloned in the same parent directory, you can use
-the local version instead of the npm package:
+run().catch(console.error);
+```
+
+## 📣 TradingView Alert / Prompt Examples
+
+If you want TradingView alerts to hit this project through the webhook route, use JSON payloads like these.
+
+### Minimal alert payload
 
 ```json
-// tradingview-agent/package.json
-"@mathieuc/tradingview": "file:../tradingview-api"
-```
-
-Then run `npm install` inside `tradingview-agent/`.
-
----
-
-## Output shape
-
-```js
 {
-  symbol, symbolId, exchange, description,
-  timeframe, price,
-  trend,          // 'strong_bullish' | 'bullish' | 'neutral' | 'bearish' | ...
-  momentum,       // 'bullish' | 'neutral_bullish' | 'neutral' | ...
-  volumeState,    // 'very_low' | 'low' | 'average' | 'high' | 'very_high'
-  volatilityState,
-  signal,         // 'breakout_watch' | 'pullback_watch' | 'bearish_breakdown_watch' | 'no_trade'
-  confidence,     // 0.0 – 1.0
-  invalidation,   // string | null
-  targets,        // string[]
-  summary,        // PT-BR formatted text block
-  indicators,     // { ema20, ema50, ema100, ema200, ma200, rsi14, avgVolume20, atr14 }
-  trendlineState, // { activeTrendlineType, lineBreakDetected, lineBreakDirection, ... }
-  zoneState,      // { zoneType, explanation, ... }
-  perpContext,    // CoinGlass overlay | null
-  macroContext,   // CoinGlass macro | null
-  marketBreadthContext, // CoinGecko breadth | null
-  trendingContext,      // CoinGecko trending | null
-  confidenceBreakdown,  // { base, afterQuality, cgAdjustment, cgkoAdjustment, final }
-  dataQuality,    // 0.0 – 1.0
-  warnings,       // string[]
-  candleCount,
-  timestamp,
+  "secret": "your-webhook-secret",
+  "query": "BTCUSDT",
+  "timeframe": "1h"
 }
 ```
 
----
+### Exchange + symbol payload
 
-## Supported timeframes
+```json
+{
+  "secret": "your-webhook-secret",
+  "exchange": "BINANCE",
+  "symbol": "ETHUSDT",
+  "timeframe": "4h"
+}
+```
+
+### Perpetual pair payload
+
+```json
+{
+  "secret": "your-webhook-secret",
+  "query": "BINANCE:BTCUSDT.P",
+  "timeframe": "15m",
+  "message": "TradingView alert fired"
+}
+```
+
+Useful TradingView-side query examples:
+
+- `BTC`
+- `ETH`
+- `BTCUSDT`
+- `BINANCE:BTCUSDT`
+- `BINANCE:BTCUSDT.P`
+- `BYBIT:ETHUSDT.P`
+
+## 🚀 QuickStart
+
+### 1. Install dependencies
+
+From the repository root:
+
+```bash
+npm install
+```
+
+### 2. Run the smoke tests
+
+The workspace test script on `main` still expects a local `.env`, so the most direct smoke-test command is:
+
+```bash
+node tradingview-agent/test/smoke.js
+```
+
+### 3. Prepare environment variables
+
+```bash
+cp tradingview-agent/.env.example tradingview-agent/.env
+```
+
+Optional keys:
+
+- `COINGLASS_API_KEY`
+- `COINGECKO_API_KEY`
+- `TRADINGVIEW_WEBHOOK_SECRET`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `OPENCLAW_DELIVERY_URL`
+
+### 4. Start the API
+
+```bash
+cd tradingview-agent
+API_KEY=your_secret npm run start:api
+```
+
+### 5. Check health
+
+```bash
+curl http://localhost:3000/health
+```
+
+### 6. Send a test analysis request
+
+```bash
+curl -X POST http://localhost:3000/analyze \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: your_secret" \
+  -d '{"query":"BTC","timeframe":"1h"}'
+```
+
+## 🧭 Supported Timeframes
+
+The current project supports:
 
 `1m` `3m` `5m` `15m` `30m` `1h` `2h` `4h` `6h` `12h` `1d` `1w`
 
----
+## 📝 Notes
 
-## License
+- The analysis core is deterministic and local.
+- External context providers are optional and degrade gracefully when unavailable.
+- The project includes a REST API, TradingView webhook ingestion, delivery modules, and backtest helpers.
+- More implementation detail is available in [`tradingview-agent/README.md`](tradingview-agent/README.md).
+
+## 📄 License
 
 MIT
