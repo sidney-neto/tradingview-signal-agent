@@ -95,6 +95,9 @@ function buildReport({
 
   const byPattern = buildPatternBreakdown(eligible);
 
+  // ── Quality breakdown ─────────────────────────────────────────────────────
+  const byQuality = buildQualityBreakdown(eligible);
+
   // ── Return report object ──────────────────────────────────────────────────
 
   return {
@@ -119,6 +122,7 @@ function buildReport({
     overall,
     confidenceBuckets,
     byPattern,
+    byQuality,
     generatedAt:          new Date().toISOString(),
   };
 }
@@ -157,6 +161,9 @@ function aggregateReports(reports) {
   // ── Aggregate pattern breakdown ───────────────────────────────────────────
   const byPattern = combinePatternBreakdowns(reports.map((r) => r.byPattern));
 
+  // ── Aggregate quality breakdown ────────────────────────────────────────────
+  const byQuality = combineQualityBreakdowns(reports.map((r) => r.byQuality));
+
   // ── Per-timeframe breakdown (useful when fixtures span multiple timeframes) ─
   const byTimeframe = buildTimeframeBreakdown(reports);
 
@@ -181,6 +188,7 @@ function aggregateReports(reports) {
     overall,
     confidenceBuckets,
     byPattern,
+    byQuality,
     byTimeframe,
     byFixture,
     generatedAt:          new Date().toISOString(),
@@ -240,6 +248,19 @@ function formatTable(report) {
     lines.push('  ' + '─'.repeat(85));
     for (const [label, g] of Object.entries(report.byPattern)) {
       lines.push(formatRow(label, g));
+    }
+    lines.push('');
+  }
+
+  // ── By Setup Quality ─────────────────────────────────────────────────────
+  if (report.byQuality && Object.keys(report.byQuality).length > 0) {
+    lines.push('  Setup Quality                 Count   Wins  Losses  Expired  Win-Rate  Avg Conf');
+    lines.push('  ' + '─'.repeat(85));
+    const qualityOrder = ['high', 'medium', 'low', 'rejected', 'unknown'];
+    for (const q of qualityOrder) {
+      if (report.byQuality[q]) {
+        lines.push(formatRow(q, report.byQuality[q]));
+      }
     }
     lines.push('');
   }
@@ -356,6 +377,45 @@ function buildPatternBreakdown(eligible) {
   const result = {};
   for (const [pattern, group] of Object.entries(groups)) {
     result[pattern] = aggregateGroup(group);
+  }
+  return result;
+}
+
+/**
+ * Build per-setup-quality breakdown from eligible steps.
+ *
+ * @param {Array} eligible
+ * @returns {object} Map of setupQuality → aggregated stats
+ */
+function buildQualityBreakdown(eligible) {
+  const groups = {};
+  for (const step of eligible) {
+    const key = step.setupQuality || 'unknown';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(step);
+  }
+  const result = {};
+  for (const [quality, group] of Object.entries(groups)) {
+    result[quality] = aggregateGroup(group);
+  }
+  return result;
+}
+
+/**
+ * Combine quality breakdown maps from multiple per-fixture reports.
+ *
+ * @param {Array<object>} qualityMaps
+ * @returns {object}
+ */
+function combineQualityBreakdowns(qualityMaps) {
+  const allKeys = new Set();
+  for (const m of qualityMaps) {
+    if (m) Object.keys(m).forEach((k) => allKeys.add(k));
+  }
+  const result = {};
+  for (const key of allKeys) {
+    const groups = qualityMaps.map((m) => (m && m[key]) ? m[key] : null).filter(Boolean);
+    result[key] = combineGroups(groups);
   }
   return result;
 }
