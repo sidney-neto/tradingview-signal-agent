@@ -81,31 +81,34 @@ async function withCache(source, symbol, fetchFn, options) {
   return result;
 }
 
+// ── Provider registry ─────────────────────────────────────────────────────────
+
+/**
+ * Create a TTL-cached wrapper for any context provider fetch function.
+ *
+ * New providers can be cached with one line:
+ *   const fetchXCached = createCachedProvider('source', fetchX);
+ *
+ * @param {string}   source   - Provider name (used as cache key prefix and log label)
+ * @param {Function} fetchFn  - Async function(symbol, options) → context data
+ * @returns {Function}        - Cached async function with the same signature as fetchFn
+ */
+function createCachedProvider(source, fetchFn) {
+  return async function cachedFetch(symbol, options) {
+    return withCache(source, symbol, fetchFn, options);
+  };
+}
+
 // ── Exported cached wrappers ──────────────────────────────────────────────────
 
-/**
- * Cached wrapper for fetchPerpContext (CoinGlass).
- * Signature matches the original exactly.
- */
-async function fetchPerpContextCached(symbol, options) {
-  return withCache('coinglass', symbol, fetchPerpContext, options);
-}
+/** Cached wrapper for fetchPerpContext (CoinGlass). */
+const fetchPerpContextCached   = createCachedProvider('coinglass',  fetchPerpContext);
 
-/**
- * Cached wrapper for fetchBybitContext.
- * Signature matches the original exactly.
- */
-async function fetchBybitContextCached(symbol, options) {
-  return withCache('bybit', symbol, fetchBybitContext, options);
-}
+/** Cached wrapper for fetchBybitContext. */
+const fetchBybitContextCached  = createCachedProvider('bybit',      fetchBybitContext);
 
-/**
- * Cached wrapper for fetchMarketContext (CoinGecko).
- * Signature matches the original exactly.
- */
-async function fetchMarketContextCached(symbol, options) {
-  return withCache('coingecko', symbol, fetchMarketContext, options);
-}
+/** Cached wrapper for fetchMarketContext (CoinGecko). */
+const fetchMarketContextCached = createCachedProvider('coingecko',  fetchMarketContext);
 
 /** Expose cache instance for testing and manual invalidation. */
 function _getCache() { return cache; }
@@ -114,6 +117,7 @@ module.exports = {
   fetchPerpContextCached,
   fetchBybitContextCached,
   fetchMarketContextCached,
+  createCachedProvider,  // exported for new providers
   _getCache,
   CACHE_ENABLED,
 };
