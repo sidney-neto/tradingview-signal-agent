@@ -2822,6 +2822,107 @@ const { fetchPerpContext: fetchPerpCtx } = require('../src/analyzer/perpContext'
   }
   console.log('✓ delivery/index barrel');
 
+  // ── tradeQualification ────────────────────────────────────────────────────────
+
+  {
+    const { computeTradeQualification } = require('../src/analyzer/tradeQualification');
+
+    {
+      const tq = computeTradeQualification({
+        signal: 'pullback_watch', confidence: 0.60, trend: 'bullish', momentum: 'neutral_bullish',
+        indicators: { ema20: 100, ema50: 95, ema100: 90, ema200: 80, ma200: 78, atr14: 2, rsi14: 52, avgVolume20: 1000 },
+        currentPrice: 97,
+        trendlineState: { lineBreakDetected: false, lineBreakDirection: 'none', bullishTrendline: null, bearishTrendline: null, pivotContext: null },
+        zoneState: { zoneType: 'none' },
+        volumeState: 'average',
+        volatilityState: 'moderate',
+      });
+
+      assert.ok(['long', 'short', 'flat'].includes(tq.tradeBias), 'tradeBias is valid');
+      assert.ok(['high', 'medium', 'low', 'rejected'].includes(tq.setupQuality), 'setupQuality is valid');
+      assert.strictEqual(tq.tradeBias, 'long', 'pullback_watch → long bias');
+      assert.ok(Array.isArray(tq.rejectReasons), 'rejectReasons is array');
+      assert.ok(Array.isArray(tq.qualityReasons), 'qualityReasons is array');
+      // With conf 0.60 and no MTF/regime context → medium or better
+      assert.ok(['medium', 'high'].includes(tq.setupQuality), 'conf 0.60 → medium or high quality');
+    }
+
+    {
+      const tq = computeTradeQualification({
+        signal: 'no_trade', confidence: 0.50, trend: 'neutral', momentum: 'neutral',
+        indicators: { ema20: 100, ema50: 95, ema100: 90, ema200: 80, ma200: 78, atr14: 2, rsi14: 50, avgVolume20: 1000 },
+        currentPrice: 100,
+        trendlineState: { lineBreakDetected: false, lineBreakDirection: 'none' },
+        zoneState: { zoneType: 'none' },
+        volumeState: 'average', volatilityState: 'moderate',
+      });
+      assert.strictEqual(tq.tradeBias,    'flat',     'no_trade → flat bias');
+      assert.strictEqual(tq.setupQuality, 'rejected', 'no_trade → rejected quality');
+    }
+  }
+  console.log('✓ analyzer/tradeQualification');
+
+  // ── mtfQualification ─────────────────────────────────────────────────────────
+
+  {
+    const { computeMtfQualification } = require('../src/analyzer/mtfQualification');
+
+    {
+      const mtf = computeMtfQualification({
+        baseTimeframe: '1h',
+        baseSignal:    'pullback_watch',
+        mtfResults: {
+          '4h': { trend: 'strong_bullish', signal: 'pullback_watch', confidence: 0.70 },
+        },
+      });
+      assert.ok(['aligned', 'conflicting', 'neutral'].includes(mtf.mtfAlignment), 'mtfAlignment is valid');
+      assert.strictEqual(mtf.mtfAlignment, 'aligned', '4h bullish + 1h bullish → aligned');
+      assert.ok(typeof mtf.confidenceAdjustment === 'number', 'confidenceAdjustment is number');
+    }
+
+    {
+      const mtf = computeMtfQualification({
+        baseTimeframe: '1h',
+        baseSignal:    'pullback_watch',
+        mtfResults:    {},
+      });
+      assert.strictEqual(mtf.mtfAlignment, 'neutral', 'no higher TFs → neutral');
+      assert.strictEqual(mtf.confidenceAdjustment, 0, 'no higher TFs → 0 adj');
+    }
+  }
+  console.log('✓ analyzer/mtfQualification');
+
+  // ── marketRegime ──────────────────────────────────────────────────────────────
+
+  {
+    const { computeMarketRegime } = require('../src/analyzer/marketRegime');
+
+    {
+      const regime = computeMarketRegime({});
+      assert.strictEqual(regime.regime, 'neutral', 'no data → neutral');
+      assert.strictEqual(regime.available, false, 'no data → not available');
+    }
+
+    {
+      const regime = computeMarketRegime({
+        marketBreadthContext: { regime: 'risk_on', gainersPercent: 65 },
+        macroContext: { fearGreed: { value: 62 }, bitcoinDominance: 48, altcoinSeason: null },
+      });
+      assert.ok(['risk_on', 'neutral'].includes(regime.regime), 'risk_on signals → risk_on or neutral');
+      assert.strictEqual(regime.available, true, 'data available → available true');
+    }
+
+    {
+      const regime = computeMarketRegime({
+        macroContext: { fearGreed: { value: 18 }, bitcoinDominance: 58, altcoinSeason: null },
+      });
+      assert.strictEqual(regime.regime, 'risk_off', 'extreme_fear + high BTC.D → risk_off');
+      assert.strictEqual(regime.fearGreedState, 'extreme_fear', 'F&G 18 → extreme_fear');
+      assert.strictEqual(regime.btcStructure, 'dominant', 'BTC.D 58 → dominant');
+    }
+  }
+  console.log('✓ analyzer/marketRegime');
+
   // ── All passed ─────────────────────────────────────────────────────────────
 
   console.log('\n✅  All smoke tests passed.');
