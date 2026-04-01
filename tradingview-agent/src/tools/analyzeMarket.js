@@ -32,6 +32,7 @@ const { buildSummary }                   = require('../analyzer/summary');
 const { computeBybitContextAdjustment }  = require('../analyzer/bybitContext');
 const { computeMarketContextAdjustment } = require('../analyzer/marketContext');
 const { computeAnalysisPipeline }        = require('../analyzer/pipeline');
+const { computeTradeQualification }      = require('../analyzer/tradeQualification');
 
 // TTL-cached wrappers for network I/O — fall through to originals when cache is disabled.
 // Set CACHE_ENABLED=true to activate; see src/cache/ for TTL env vars.
@@ -345,6 +346,26 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
     cgkoReasons:      cgkoReasons,
   };
 
+  // --- 12d. Trade qualification layer (pure — no network I/O) ---
+  //
+  // Produces structured, numerical trade plan metadata from the pipeline output
+  // and any available context. marketRegime will be null until Phase D is wired in.
+  // mtfQualification will be null here (only available at the MTF wrapper level).
+  const tradeQualification = computeTradeQualification({
+    signal,
+    confidence,
+    trend,
+    momentum,
+    indicators,
+    currentPrice,
+    trendlineState,
+    zoneState,
+    volumeState,
+    volatilityState,
+    mtfQualification: null,  // filled in by analyzeMarketMTF — not available here
+    marketRegime:     null,  // filled in Phase D
+  });
+
   // --- 13. Summary ---
   const summary = buildSummary({
     symbol:          symbol.symbol,
@@ -402,6 +423,7 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
     dataQuality,
     warnings,
     chartPatterns,
+    tradeQualification,
     candleCount:     candles.length,
     timestamp:       new Date().toISOString(),
   };
