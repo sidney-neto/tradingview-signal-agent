@@ -20,9 +20,16 @@ assert.strictEqual(resolveTimeframe('1d'), '1D',  'resolveTimeframe 1d → 1D');
 assert.strictEqual(resolveTimeframe('1w'), '1W',  'resolveTimeframe 1w → 1W');
 assert.ok(getSupportedTimeframes().includes('15m'), 'getSupportedTimeframes includes 15m');
 
+assert.strictEqual(resolveTimeframe('2h'),  '120', 'resolveTimeframe 2h → 120');
+assert.strictEqual(resolveTimeframe('6h'),  '360', 'resolveTimeframe 6h → 360');
+assert.strictEqual(resolveTimeframe('12h'), '720', 'resolveTimeframe 12h → 720');
+assert.strictEqual(resolveTimeframe('1m'),  '1',   'resolveTimeframe 1m → 1');
+assert.strictEqual(resolveTimeframe('3m'),  '3',   'resolveTimeframe 3m → 3');
+
+// Verify unsupported still throws
 let threw = false;
-try { resolveTimeframe('2h'); } catch (_) { threw = true; }
-assert.ok(threw, 'resolveTimeframe 2h should throw');
+try { resolveTimeframe('7h'); } catch (_) { threw = true; }
+assert.ok(threw, 'resolveTimeframe 7h should throw');
 
 console.log('✓ utils/timeframes');
 
