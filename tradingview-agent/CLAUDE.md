@@ -125,10 +125,20 @@ npm run backtest -- --fixture BTCUSDT_1h.json --lookahead 10 --win 1.5 --loss 0.
 
 ---
 
-## Current next-step priorities (as of 2026-03-20)
+## Key modules added in 2026-03-31 session
+
+| Module | Responsibility |
+|--------|---------------|
+| `src/analyzer/tradeQualification.js` | Pure function: produces structured trade plan (entryZone, stopPrice, TPs, R:R, setupQuality, tradeBias) from pipeline output + optional MTF/regime context |
+| `src/analyzer/mtfQualification.js`   | Pure function: evaluates higher-TF trend alignment against base signal; used by `analyzeMarketMTF` |
+| `src/analyzer/marketRegime.js`       | Pure function: consolidates CoinGlass macro + CoinGecko breadth into regime (`risk_on`/`risk_off`/`neutral`) |
+
+---
+
+## Current next-step priorities
 
 1. Telegram bot layer (`src/bot/`) — command-based interface (`/analyze SYMBOL TIMEFRAME`)
 2. Persistent job queue — for high-volume webhook scenarios
 3. Redis-backed rate limiting — for multi-instance deployments
-4. More backtest fixture data — for meaningful pattern/signal comparison
-5. Bybit context wiring — bridge `bybitContext.js` into confidence scoring (analogous to `perpContext.js`)
+4. More backtest fixture data — for meaningful quality/regime comparison
+5. BTC/ETH structural state via `analyzeMarket` calls (currently regime only uses macro/breadth data)

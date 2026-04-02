@@ -88,7 +88,8 @@ function runBacktest({
       continue;
     }
 
-    const { signal, confidence, trend, momentum, chartPatterns } = analysis;
+    const { signal, confidence, trend, momentum, chartPatterns, tradeQualification } = analysis;
+    const setupQuality = tradeQualification?.setupQuality || null;
 
     // Primary pattern: first confirmed or forming pattern (by confidence desc), or null.
     // Used for per-pattern breakdown in reports. When skipPatterns=true, chartPatterns is [].
@@ -122,6 +123,7 @@ function runBacktest({
       confidence,
       trend,
       momentum,
+      setupQuality,   // from tradeQualification: high|medium|low|rejected|null
       primaryPattern, // null when skipPatterns=true or no patterns detected
       entryPrice,
       outcome,

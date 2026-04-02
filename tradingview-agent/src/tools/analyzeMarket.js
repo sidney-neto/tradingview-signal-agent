@@ -32,6 +32,8 @@ const { buildSummary }                   = require('../analyzer/summary');
 const { computeBybitContextAdjustment }  = require('../analyzer/bybitContext');
 const { computeMarketContextAdjustment } = require('../analyzer/marketContext');
 const { computeAnalysisPipeline }        = require('../analyzer/pipeline');
+const { computeTradeQualification }      = require('../analyzer/tradeQualification');
+const { computeMarketRegime }            = require('../analyzer/marketRegime');
 
 // TTL-cached wrappers for network I/O — fall through to originals when cache is disabled.
 // Set CACHE_ENABLED=true to activate; see src/cache/ for TTL env vars.
@@ -40,6 +42,12 @@ const { fetchCandlesCached: fetchCandles }               = require('../cache/can
 const { fetchPerpContextCached: fetchPerpContext }       = require('../cache/overlayCache');
 const { fetchBybitContextCached: fetchBybitContext }     = require('../cache/overlayCache');
 const { fetchMarketContextCached: fetchMarketContext }   = require('../cache/overlayCache');
+
+function candleTimeToIso(time) {
+  if (typeof time !== 'number') return null;
+  const ms = time < 1e12 ? time * 1000 : time;
+  return new Date(ms).toISOString();
+}
 
 /**
  * @typedef {object} AnalyzeOptions
@@ -327,6 +335,17 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
     }
   }
 
+  // --- 12d. Market regime (pure — consolidated context layer) ---
+  //
+  // Combines all available context signals into a single regime classification.
+  // Used by tradeQualification to adjust setup quality.
+  // Does not alter confidence directly — that is handled by the CoinGlass/Bybit/CoinGecko
+  // overlay chain above.
+  const marketRegime = computeMarketRegime({
+    macroContext,
+    marketBreadthContext,
+  });
+
   // Confidence breakdown — always present, regardless of overlay availability.
   // Chain: base → afterQuality → cgAdjustment (CoinGlass) → bybitAdjustment (Bybit fallback) → cgkoAdjustment (CoinGecko) → final
   const cgAdjustmentApplied = round2(afterCGConfidence - qualityAdjustedConfidence);
@@ -343,7 +362,29 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
     bybitReasons:     bybitReasons,
     cgkoAvailable:    marketBreadthContext !== null || trendingContext !== null,
     cgkoReasons:      cgkoReasons,
+    regimeAvailable:  marketRegime.available,
+    regime:           marketRegime.regime,
   };
+
+  // --- 12e. Trade qualification layer (pure — no network I/O) ---
+  //
+  // Produces structured, numerical trade plan metadata from the pipeline output
+  // and all available context.
+  // mtfQualification is null here — only available at the MTF wrapper level.
+  const tradeQualification = computeTradeQualification({
+    signal,
+    confidence,
+    trend,
+    momentum,
+    indicators,
+    currentPrice,
+    trendlineState,
+    zoneState,
+    volumeState,
+    volatilityState,
+    mtfQualification: null,  // filled in by analyzeMarketMTF
+    marketRegime,
+  });
 
   // --- 13. Summary ---
   const summary = buildSummary({
@@ -374,6 +415,8 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
   });
 
   // --- 14. Return structured result ---
+  const lastCandle = candles[candles.length - 1] || null;
+
   return {
     symbol:          symbol.symbol,
     symbolId:        symbol.id,
@@ -402,7 +445,10 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
     dataQuality,
     warnings,
     chartPatterns,
+    marketRegime,
+    tradeQualification,
     candleCount:     candles.length,
+    lastCandleTime:  lastCandle ? candleTimeToIso(lastCandle.time) : null,
     timestamp:       new Date().toISOString(),
   };
 }
