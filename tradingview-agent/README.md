@@ -18,6 +18,7 @@ Designed for use by AI agents (OpenClaw), Telegram bots, and any system that nee
 - **Delivery layer** — send analysis results to Telegram and/or OpenClaw after webhook events
 - **Backtesting** — rolling-window replay with hit-rate stats; includes `byQuality` breakdown per setup quality tier
 - **TTL cache** — in-memory caching for symbol resolution, candles, and overlay fetches; extensible via `createCachedProvider` factory
+- **Local historical persistence** — optional SQLite snapshot store for webhook/API analyses, MTF comparison, and later trade review
 
 ---
 
@@ -80,6 +81,9 @@ tradingview-agent/
       symbolCache.js        ← TTL cache for symbol resolution
       candleCache.js        ← TTL cache for candle fetches
       overlayCache.js       ← TTL cache for CoinGlass/Bybit/CoinGecko
+    storage/
+      analysisRepository.js ← SQLite persistence for historical analysis snapshots
+      persistence.js        ← write helpers for webhook/API/MTF flows
     adapters/tradingview/   ← thin adapter over @mathieuc/tradingview npm package
       symbolSearch.js       ← resolves query → symbolId
       candles.js            ← fetches OHLCV via WebSocket (one-shot)
@@ -116,6 +120,12 @@ node test/smoke.js
 # Start the REST API server (port 3000 by default)
 API_KEY=your_secret npm run start:api
 # Or: PORT=8080 API_KEY=your_secret npm run start:api
+
+# Run persistence-specific tests
+npm run test:persistence
+
+# Query persisted history
+PERSISTENCE_ENABLED=true npm run history -- --symbol-id BINANCE:BTCUSDT --limit 5
 ```
 
 ---
@@ -197,6 +207,9 @@ Reports configuration state only (no live external checks) — suitable for load
 
 Runs `analyzeMarket` and returns the full structured result as JSON.
 
+If `PERSISTENCE_ENABLED=true` and `PERSIST_ANALYZE_ROUTE=true`, successful
+responses are also written to the local snapshot store.
+
 **Request body:**
 ```json
 {
@@ -228,6 +241,9 @@ curl -X POST http://localhost:3000/analyze \
 
 Receives a TradingView alert payload, normalizes it, runs the analysis pipeline, and returns a structured JSON response.
 
+If `PERSISTENCE_ENABLED=true`, each successful webhook analysis is also written
+to the local snapshot store before delivery fan-out.
+
 **Auth:** shared secret — set `TRADINGVIEW_WEBHOOK_SECRET` in the server environment. The secret can be sent in either:
 - `X-Webhook-Secret` request header *(preferred)*
 - `"secret"` field in the JSON payload
@@ -250,6 +266,55 @@ Rate limiting for the webhook is independent from `/analyze`. See env vars below
 1. `query` field — used as-is
 2. `exchange` + `symbol` — joined as `"EXCHANGE:SYMBOL"`
 3. `symbol` — used as-is (uppercased)
+
+## Local Persistence
+
+Persistence is optional and intentionally separate from the TTL cache.
+
+- Cache exists to reduce repeated live calls over a short window.
+- Persistence exists to create a durable audit trail of analysis snapshots.
+- The database stores metadata plus the full final analysis JSON, not raw candles.
+
+### Configuration
+
+```bash
+PERSISTENCE_ENABLED=false
+PERSISTENCE_DB_PATH=./data/tradingview-agent.sqlite
+PERSIST_ANALYZE_ROUTE=false
+```
+
+- `PERSISTENCE_ENABLED=true` enables SQLite-backed snapshot writes.
+- `PERSISTENCE_DB_PATH` controls where the local database file lives.
+- `PERSIST_ANALYZE_ROUTE=true` opts `POST /analyze` into persistence; webhook persistence does not need this extra flag.
+- The implementation uses Node's built-in `node:sqlite` module. Use a Node version that includes it.
+
+### What gets stored
+
+Each row in `analysis_runs` captures:
+
+- request metadata: source, correlation id, query, timeframe
+- identity: symbol, symbolId, exchange
+- signal snapshot: signal, confidence, trend, momentum, setup quality, trade bias, market regime
+- timing: `timestamp` as `analyzed_at` and `lastCandleTime` as `last_candle_time`
+- full `analysis_json` for later inspection
+
+`trade_cases` is included as the minimal anchor table for linking multiple
+analysis snapshots to a trade lifecycle in later phases.
+
+### History Queries
+
+Use the built-in CLI:
+
+```bash
+# Recent snapshots for a symbol
+npm run history -- --symbol-id BINANCE:BTCUSDT --limit 10
+
+# Snapshots for a trade
+npm run history -- --trade-id <trade-id>
+
+# Snapshots captured in the same MTF run
+npm run history -- --group-id <group-id>
+```
 
 **Example — simulate a TradingView alert with curl:**
 ```bash
@@ -426,7 +491,13 @@ const { analyzeMarketMTF } = require('./src/tools/analyzeMarketMTF');
 const result = await analyzeMarketMTF({
   query:      'BTC',
   timeframes: ['1h', '4h', '1d'],
-  options:    {},               // forwarded to each analyzeMarket call
+  options: {
+    persistence: {
+      enabled:       true,
+      source:        'mtf_manual',
+      correlationId: 'corr-123',
+    },
+  },
 });
 
 // result.results['1h']  — full analyzeMarket output for 1h
@@ -434,6 +505,7 @@ const result = await analyzeMarketMTF({
 // result.errors['1d']   — { error, code } if that timeframe failed
 // result.mtfSummary     — PT-BR formatted multi-TF block (null if <2 succeeded)
 // result.warnings       — per-timeframe failure messages
+// result.persistence    — { persisted, groupId, persistedCount }
 ```
 
 Timeframes are fetched concurrently. Per-timeframe errors are captured in `errors` instead of aborting the whole call.
@@ -842,6 +914,7 @@ const result = await analyzeMarket({
   dataQuality:    'fair',            // good | fair | poor
   warnings:       ['EMA200 unavailable (likely insufficient history).'],
   candleCount:    287,
+  lastCandleTime: '2026-03-16T09:45:00.000Z',
   summary:        'BTCUSDT @ 67420.5 (15m) Trend: Bullish. Momentum: Neutral Bullish...',
   timestamp:      '2026-03-16T10:00:00.000Z',
 }

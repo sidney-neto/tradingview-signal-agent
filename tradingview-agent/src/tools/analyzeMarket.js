@@ -43,6 +43,12 @@ const { fetchPerpContextCached: fetchPerpContext }       = require('../cache/ove
 const { fetchBybitContextCached: fetchBybitContext }     = require('../cache/overlayCache');
 const { fetchMarketContextCached: fetchMarketContext }   = require('../cache/overlayCache');
 
+function candleTimeToIso(time) {
+  if (typeof time !== 'number') return null;
+  const ms = time < 1e12 ? time * 1000 : time;
+  return new Date(ms).toISOString();
+}
+
 /**
  * @typedef {object} AnalyzeOptions
  * @property {number} [candleCount]      - How many candles to fetch (default: 300)
@@ -329,6 +335,17 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
     }
   }
 
+  // --- 12d. Market regime (pure — consolidated context layer) ---
+  //
+  // Combines all available context signals into a single regime classification.
+  // Used by tradeQualification to adjust setup quality.
+  // Does not alter confidence directly — that is handled by the CoinGlass/Bybit/CoinGecko
+  // overlay chain above.
+  const marketRegime = computeMarketRegime({
+    macroContext,
+    marketBreadthContext,
+  });
+
   // Confidence breakdown — always present, regardless of overlay availability.
   // Chain: base → afterQuality → cgAdjustment (CoinGlass) → bybitAdjustment (Bybit fallback) → cgkoAdjustment (CoinGecko) → final
   const cgAdjustmentApplied = round2(afterCGConfidence - qualityAdjustedConfidence);
@@ -348,17 +365,6 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
     regimeAvailable:  marketRegime.available,
     regime:           marketRegime.regime,
   };
-
-  // --- 12d. Market regime (pure — consolidated context layer) ---
-  //
-  // Combines all available context signals into a single regime classification.
-  // Used by tradeQualification to adjust setup quality.
-  // Does not alter confidence directly — that is handled by the CoinGlass/Bybit/CoinGecko
-  // overlay chain above.
-  const marketRegime = computeMarketRegime({
-    macroContext,
-    marketBreadthContext,
-  });
 
   // --- 12e. Trade qualification layer (pure — no network I/O) ---
   //
@@ -409,6 +415,8 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
   });
 
   // --- 14. Return structured result ---
+  const lastCandle = candles[candles.length - 1] || null;
+
   return {
     symbol:          symbol.symbol,
     symbolId:        symbol.id,
@@ -440,6 +448,7 @@ async function analyzeMarket({ query, timeframe, options = {} }) {
     marketRegime,
     tradeQualification,
     candleCount:     candles.length,
+    lastCandleTime:  lastCandle ? candleTimeToIso(lastCandle.time) : null,
     timestamp:       new Date().toISOString(),
   };
 }

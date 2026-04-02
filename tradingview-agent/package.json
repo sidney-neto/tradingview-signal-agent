@@ -13,8 +13,11 @@
   },
   "scripts": {
     "test": "node test/smoke.js",
+    "test:persistence": "node test/persistence.test.js",
+    "test:all": "node test/smoke.js && node test/persistence.test.js",
     "start": "node --env-file=.env",
     "start:api": "node --env-file=.env src/api/index.js",
-    "backtest": "node scripts/backtest.js"
+    "backtest": "node scripts/backtest.js",
+    "history": "node scripts/history.js"
   }
 }

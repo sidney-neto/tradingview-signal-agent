@@ -33,6 +33,7 @@ const { getSupportedTimeframes } = require('../utils/timeframes');
 const logger = require('../logger');
 const { computeMtfQualification }   = require('../analyzer/mtfQualification');
 const { computeTradeQualification } = require('../analyzer/tradeQualification');
+const { isPersistenceEnabled, persistMtfAnalysisResults } = require('../storage');
 
 /**
  * Run analyzeMarket for each timeframe concurrently and aggregate results.
@@ -142,6 +143,38 @@ async function analyzeMarketMTF({ query, timeframes, options = {} }) {
     ? buildMTFSummary(successfulResults)
     : null;
 
+  const persistenceOptions = options.persistence || null;
+  let persistence = {
+    persisted: false,
+    groupId: null,
+    persistedCount: 0,
+  };
+
+  const shouldPersist = persistenceOptions
+    ? (persistenceOptions.enabled ?? isPersistenceEnabled())
+    : false;
+
+  if (shouldPersist && successfulResults.length > 0) {
+    const persisted = persistMtfAnalysisResults({
+      enabled: true,
+      dbPath: persistenceOptions.dbPath,
+      source: persistenceOptions.source || 'mtf_manual',
+      correlationId: persistenceOptions.correlationId || null,
+      query,
+      rawPayload: persistenceOptions.rawPayload || null,
+      results,
+      tradeId: persistenceOptions.tradeId || null,
+      parentAnalysisId: persistenceOptions.parentAnalysisId || null,
+      groupId: persistenceOptions.groupId,
+    });
+
+    persistence = {
+      persisted: persisted.persisted,
+      groupId: persisted.groupId,
+      persistedCount: persisted.rows.length,
+    };
+  }
+
   const successCount = successfulResults.length;
   const errorCount   = Object.keys(errors).length;
 
@@ -154,6 +187,7 @@ async function analyzeMarketMTF({ query, timeframes, options = {} }) {
     errors,
     warnings,
     mtfSummary,
+    persistence,
   };
 }
 

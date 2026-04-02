@@ -4,6 +4,11 @@ const { Router } = require('express');
 
 const { analyzeMarket } = require('../../tools/analyzeMarket');
 const logger = require('../../logger');
+const {
+  isPersistenceEnabled,
+  shouldPersistAnalyzeRoute,
+  persistAnalysisSnapshot,
+} = require('../../storage');
 
 const {
   SymbolNotFoundError,
@@ -69,6 +74,15 @@ router.post('/', async (req, res) => {
       signal:     result.signal,
       confidence: result.confidence,
     });
+
+    if (isPersistenceEnabled() && shouldPersistAnalyzeRoute()) {
+      persistAnalysisSnapshot({
+        source: 'api_analyze',
+        request: { query: cleanQuery, timeframe: cleanTimeframe },
+        rawPayload: req.body || null,
+        analysis: result,
+      });
+    }
 
     return res.json(result);
 

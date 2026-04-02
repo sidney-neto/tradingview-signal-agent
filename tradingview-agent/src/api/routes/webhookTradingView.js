@@ -43,6 +43,7 @@ const logger      = require('../../logger');
 const { analyzeMarket }   = require('../../tools/analyzeMarket');
 const { getSupportedTimeframes } = require('../../utils/timeframes');
 const { deliverAnalysis } = require('../../delivery');
+const { isPersistenceEnabled, persistAnalysisSnapshot } = require('../../storage');
 
 const DEDUP_TTL_MS          = parseInt(process.env.WEBHOOK_DEDUP_TTL_MS          || '10000',  10);
 const NO_TRADE_DEDUP_TTL_MS = parseInt(process.env.WEBHOOK_NO_TRADE_DEDUP_TTL_MS || '300000', 10); // 5 min default
@@ -235,6 +236,16 @@ async function handleWebhook(req, res) {
     confidence: analysis.confidence,
     durationMs,
   });
+
+  if (isPersistenceEnabled()) {
+    persistAnalysisSnapshot({
+      source: 'tradingview_webhook',
+      correlationId,
+      request: { query, timeframe },
+      rawPayload: req.body || null,
+      analysis,
+    });
+  }
 
   // ── Post-analysis delivery policy ────────────────────────────────────────
   //

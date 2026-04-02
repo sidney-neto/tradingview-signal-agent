@@ -31,6 +31,12 @@ const defaults = require('../config/defaults');
 const { computeAnalysisPipeline }   = require('../analyzer/pipeline');
 const { computeTradeQualification } = require('../analyzer/tradeQualification');
 
+function candleTimeToIso(time) {
+  if (typeof time !== 'number') return null;
+  const ms = time < 1e12 ? time * 1000 : time;
+  return new Date(ms).toISOString();
+}
+
 function analyzeCandles({ candles, symbol, symbolId, timeframe, options = {} }) {
   if (!Array.isArray(candles) || candles.length < defaults.MIN_CANDLES) {
     throw new Error(
@@ -113,7 +119,8 @@ function analyzeCandles({ candles, symbol, symbolId, timeframe, options = {} }) 
     chartPatterns,
     tradeQualification,
     candleCount:          candles.length,
-    timestamp:            new Date(candles[candles.length - 1].time * 1000).toISOString(),
+    lastCandleTime:       candleTimeToIso(candles[candles.length - 1].time),
+    timestamp:            candleTimeToIso(candles[candles.length - 1].time),
   };
 }
 
